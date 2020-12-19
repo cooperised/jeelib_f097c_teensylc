@@ -1102,6 +1102,7 @@ static volatile byte watchdogCounter;
 static byte backupMode = 0;
 
 void Sleepy::watchdogInterrupts (char mode) {
+#if 0
 #ifndef WDTCSR
 #define WDTCSR WDTCR
 #endif
@@ -1117,6 +1118,7 @@ void Sleepy::watchdogInterrupts (char mode) {
         WDTCSR |= (1<<WDCE) | (1<<WDE); // timed sequence
         WDTCSR = wdtcsr;
     }
+#endif
 }
 
 /// @see http://www.nongnu.org/avr-libc/user-manual/group__avr__sleep.html
