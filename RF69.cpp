@@ -1,6 +1,15 @@
 #include <stdint.h>
 #include <RF69.h>
+
+#if defined(__arm__)
+#include <RF69_arm.h>
+#else
 #include <RF69_avr.h>
+#endif
+#include <util/crc16.h>
+//#if defined(__arm__) // massive hack to circumvent VirtualWire's override of util/crc16.h
+//#define _crc16_update crc16_update
+//#endif
 
 #define REG_FIFO            0x00
 #define REG_OPMODE          0x01

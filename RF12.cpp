@@ -20,7 +20,11 @@
 #define slack           6
 #define crc_initVal     0x1D0F
 #define crc_endVal      0x1D0F
+//#if defined(__arm__) // massive hack to circumvent VirtualWire's override of util/crc16.h
+//#define crc_update      crc_xmodem_update
+//#else
 #define crc_update      _crc_xmodem_update
+//#endif
 #else
 #define rf12_rawlen     rf12_len
 // #define rf12_dest    (rf12_hdr & RF12_HDR_DST ? rf12_hdr & RF12_HDR_MASK : 0)
@@ -28,7 +32,11 @@
 #define slack           5
 #define crc_initVal     ~0
 #define crc_endVal      0
+//#if defined(__arm__) // massive hack to circumvent VirtualWire's override of util/crc16.h
+//#define crc_update      crc16_update
+//#else
 #define crc_update      _crc16_update
+//#endif
 #endif
 
 // #define OPTIMIZE_SPI 1  // uncomment this to write to the RFM12B @ 8 Mhz
@@ -98,6 +106,11 @@
 #define SPI_MOSI    16    // PB2, pin 10, Digital16
 #define SPI_SCK     15    // PB1, pin 9, Digital15
 
+#elif defined(__arm__)
+
+#define RFM_IRQ     15
+#define CS_PIN      10
+
 #else
 
 // ATmega168, ATmega328, etc.
@@ -139,8 +152,6 @@ enum {
     TXRECV,
     TXPRE1, TXPRE2, TXPRE3, TXSYN1, TXSYN2,
 };
-
-static uint8_t cs_pin = SS_BIT;     // chip select pin
 
 static uint8_t nodeid;              // address of this node
 static uint8_t group;               // network group
@@ -184,6 +195,138 @@ void rf12_set_cs (uint8_t pin) {
   cs_pin = pin - 8;             // Dig10 (PB2), Dig9 (PB1), or Dig8 (PB0)
 #endif
 }
+
+#if defined(__arm__)
+
+#include <SPI.h>
+
+void rf12_spiInit() {
+    SPI.setSCK(13);
+}
+
+static SPISettings slowSettings(2000000, MSBFIRST, SPI_MODE0);
+#if OPTIMIZE_SPI
+static SPISettings fastSettings(8000000, MSBFIRST, SPI_MODE0);
+#else
+#define fastSettings slowSettings
+#endif
+
+static uint16_t rf12_byte (SPISettings &settings, uint16_t cmd) {
+    SPI.beginTransaction(settings);
+    digitalWriteFast(CS_PIN, LOW);
+    uint16_t rec = SPI.transfer(cmd >> 8) << 8;
+    rec |= SPI.transfer(cmd & 0xFF);
+    digitalWriteFast(CS_PIN, HIGH);
+    SPI.endTransaction();
+    return rec;
+}
+
+
+static uint16_t rf12_xferSlow (uint16_t cmd) {
+    return rf12_byte(slowSettings, cmd);
+}
+
+static void rf12_xfer (uint16_t cmd) {
+    rf12_byte(fastSettings, cmd);
+}
+
+#define rf12_control rf12_xferSlow
+
+static void rf12_interrupt () {
+    // a transfer of 2x 16 bits @ 2 MHz over SPI takes 2x 8 us inside this ISR
+    // correction: now takes 2 + 8 µs, since sending can be done at 8 MHz
+    rf12_xfer(0x0000);
+
+    if (rxstate == TXRECV) {
+        uint8_t in = rf12_xferSlow(RF_RX_FIFO_READ);
+
+        if (rxfill == 0 && group != 0)
+            rf12_buf[rxfill++] = group;
+
+#if RF12_COMPAT
+        in ^= whitening[rxfill-1];
+#endif
+        rf12_buf[rxfill++] = in;
+        rf12_crc = crc_update(rf12_crc, in);
+
+        if (rxfill >= rf12_len + 5 + RF12_COMPAT || rxfill >= RF_MAX)
+            rf12_xfer(RF_IDLE_MODE);
+    } else {
+        uint8_t out;
+
+        if (rxstate < 0) {
+            uint8_t pos = 3 + RF12_COMPAT + rf12_len + rxstate++;
+            out = rf12_buf[pos];
+            rf12_crc = crc_update(rf12_crc, out);
+#if RF12_COMPAT
+            out ^= whitening[pos-1];
+#endif
+        } else {
+            switch (rxstate) {
+                case TXSYN1: out = 0x2D; break;
+                case TXSYN2: out = group;
+                             rxstate = - (3 + RF12_COMPAT + rf12_len);
+                             break;
+#if RF12_COMPAT
+                case TXCRC1: out = ~rf12_crc >> 8; break;
+                case TXCRC2: out = ~rf12_crc; break;
+#else
+                case TXCRC1: out = rf12_crc; break;
+                case TXCRC2: out = rf12_crc >> 8; break;
+#endif
+                case TXDONE: rf12_xfer(RF_IDLE_MODE); // fall through
+                default:     out = 0xAA;
+            }
+#if RF12_COMPAT
+            if (rxstate < TXDONE) // this applies only to TXCRC1 and TXCRC2
+                out ^= whitening[3 + rf12_len + rxstate];
+#endif
+            ++rxstate;
+        }
+
+        rf12_xfer(RF_TXREG_WRITE + out);
+    }
+}
+
+#if PINCHG_IRQ
+    #if RFM_IRQ < 8
+        ISR(PCINT0_vect) {
+            while (!bitRead(PINB, RFM_IRQ))
+                rf12_interrupt();
+        }
+    #elif RFM_IRQ < 16
+        ISR(PCINT1_vect) {
+            while (!bitRead(PINC, RFM_IRQ - 8))
+                rf12_interrupt();
+        }
+    #else
+        ISR(PCINT2_vect) {
+            while (!bitRead(PIND, RFM_IRQ - 16))
+                rf12_interrupt();
+        }
+    #endif
+#endif
+
+static void rf12_recvStart () {
+    if (rf12_fixed_pkt_len) {
+        rf12_rawlen = rf12_fixed_pkt_len;
+        rf12_grp = rf12_hdr = 0;
+        rxfill = 3;
+    } else
+        rxfill = rf12_rawlen = 0;
+    rf12_crc = crc_initVal;
+#if RF12_VERSION >= 2 && !RF12_COMPAT
+    if (group != 0)
+        rf12_crc = crc_update(rf12_crc, group);
+#endif
+    rxstate = TXRECV;
+
+    rf12_xfer(RF_RECEIVER_ON);
+}
+
+#else // defined (__arm__)
+
+static uint8_t cs_pin = SS_BIT;     // chip select pin
 
 /// @details
 /// Initialise the SPI port for use by the RF12 driver.
@@ -404,6 +547,8 @@ static void rf12_recvStart () {
 
     rf12_xfer(RF_RECEIVER_ON);
 }
+
+#endif // defined (__arm__)
 
 #include <RF12.h>
 #include <Ports.h> // needed to avoid a linker error :(

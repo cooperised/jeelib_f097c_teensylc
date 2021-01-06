@@ -2,6 +2,11 @@
 #include <avr/eeprom.h>
 #include <avr/sleep.h>
 #include <util/crc16.h>
+#if defined(__arm__)
+#define IRQ_PIN 15
+#else
+#define IRQ_PIN 0
+#endif
 
 volatile uint16_t rf69_crc;
 volatile uint8_t rf69_buf[72];
@@ -36,10 +41,11 @@ uint8_t rf69_initialize (uint8_t id, uint8_t band, uint8_t group, uint16_t off) 
     RF69::group = group;
     RF69::node = id & RF12_HDR_MASK;
     delay(20); // needed to make RFM69 work properly on power-up
-    if (RF69::node != 0)
-        attachInterrupt(0, RF69::interrupt_compat, RISING);
-    else
-        detachInterrupt(0);
+    if (RF69::node != 0) {
+        attachInterrupt(IRQ_PIN, RF69::interrupt_compat, RISING);
+    } else {
+        detachInterrupt(IRQ_PIN);
+    }
     RF69::configure_compat();
     return nodeid = id;
 }
