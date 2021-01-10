@@ -4,16 +4,7 @@
 #ifndef JeeLib_h
 #define JeeLib_h
 
-// Include RF69 in compatibility mode if so requested, i.e. by inserting the
-// line "#define RF69_COMPAT 1" before including this <JeeLib.h> header file.
-// Define it as 0 otherwise, to support "if (RF69_COMPAT) ..." in app code.
-
-#if RF69_COMPAT
 #include <RF69_compat.h>
-#elif !defined(RF69_COMPAT)
-#define RF69_COMPAT 0
-#endif
-
 #include <Ports.h>
 #include <RF12.h>
 #include <RF69.h>
